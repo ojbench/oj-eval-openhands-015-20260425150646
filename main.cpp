@@ -22,6 +22,7 @@ class FileDatabase {
 private:
     unordered_map<string, vector<IndexEntry>> index;
     bool index_loaded;
+    int operations_since_save;
     
     void loadIndex() {
         if (index_loaded) return;
@@ -93,8 +94,16 @@ private:
             }
         }
         
-        if (total_entries > 1000 && deleted_entries > total_entries / 2) {
+        if (total_entries > 5000 && deleted_entries > total_entries * 3 / 4) {
             compact();
+        }
+    }
+    
+    void saveIndexIfNeeded() {
+        operations_since_save++;
+        if (operations_since_save >= 100) {
+            saveIndex();
+            operations_since_save = 0;
         }
     }
     
@@ -125,7 +134,7 @@ private:
     }
     
 public:
-    FileDatabase() : index_loaded(false) {}
+    FileDatabase() : index_loaded(false), operations_since_save(0) {}
     
     void insert(const string& key, int value) {
         if (entryExistsInIndex(key, value)) return;
@@ -145,7 +154,7 @@ public:
         data_file.close();
         
         index[key].push_back({value, file_pos, false});
-        saveIndex();
+        saveIndexIfNeeded();
     }
     
     void remove(const string& key, int value) {
@@ -164,7 +173,7 @@ public:
         }
         
         if (found) {
-            saveIndex();
+            saveIndexIfNeeded();
             compactIfNeeded();
         }
     }
@@ -196,6 +205,10 @@ public:
             }
             cout << endl;
         }
+    }
+    
+    void forceSaveIndex() {
+        saveIndex();
     }
 };
 
@@ -229,5 +242,6 @@ int main() {
         }
     }
     
+    db.forceSaveIndex();
     return 0;
 }
