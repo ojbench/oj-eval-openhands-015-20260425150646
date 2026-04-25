@@ -4,109 +4,177 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <sstream>
-#include <filesystem>
+#include <unordered_map>
+#include <set>
 
 using namespace std;
 
-const string DATABASE_FILE = "database.txt";
+const string DATABASE_FILE = "database.dat";
+const string INDEX_FILE = "index.dat";
 
 struct Entry {
     string key;
     int value;
+    long long file_pos;
 };
 
-vector<Entry> readAllEntries() {
-    vector<Entry> entries;
-    ifstream file(DATABASE_FILE);
+class FileDatabase {
+private:
+    unordered_map<string, vector<pair<int, long long>>> index;
+    bool index_loaded;
     
-    if (!file.is_open()) {
-        return entries;
-    }
-    
-    string line;
-    while (getline(file, line)) {
-        istringstream iss(line);
-        string key;
-        int value;
+    void loadIndex() {
+        if (index_loaded) return;
         
-        if (iss >> key >> value) {
-            entries.push_back({key, value});
+        index.clear();
+        ifstream idx_file(INDEX_FILE, ios::binary);
+        if (!idx_file.is_open()) {
+            index_loaded = true;
+            return;
         }
-    }
-    
-    file.close();
-    return entries;
-}
-
-bool entryExists(const vector<Entry>& entries, const string& key, int value) {
-    for (const auto& entry : entries) {
-        if (entry.key == key && entry.value == value) {
-            return true;
+        
+        string key;
+        size_t key_len;
+        int value;
+        long long file_pos;
+        
+        while (idx_file.read(reinterpret_cast<char*>(&key_len), sizeof(key_len))) {
+            key.resize(key_len);
+            idx_file.read(&key[0], key_len);
+            idx_file.read(reinterpret_cast<char*>(&value), sizeof(value));
+            idx_file.read(reinterpret_cast<char*>(&file_pos), sizeof(file_pos));
+            index[key].push_back({value, file_pos});
         }
-    }
-    return false;
-}
-
-void insertEntry(const string& key, int value) {
-    vector<Entry> entries = readAllEntries();
-    
-    if (entryExists(entries, key, value)) {
-        return;
+        
+        idx_file.close();
+        index_loaded = true;
     }
     
-    ofstream file(DATABASE_FILE, ios::app);
-    if (file.is_open()) {
-        file << key << " " << value << endl;
-        file.close();
-    }
-}
-
-void deleteEntry(const string& key, int value) {
-    vector<Entry> entries = readAllEntries();
-    
-    ofstream file(DATABASE_FILE);
-    if (!file.is_open()) {
-        return;
-    }
-    
-    bool found = false;
-    for (const auto& entry : entries) {
-        if (entry.key == key && entry.value == value) {
-            found = true;
-        } else {
-            file << entry.key << " " << entry.value << endl;
+    void saveIndex() {
+        ofstream idx_file(INDEX_FILE, ios::binary);
+        if (!idx_file.is_open()) return;
+        
+        for (const auto& [key, entries] : index) {
+            for (const auto& [value, file_pos] : entries) {
+                size_t key_len = key.length();
+                idx_file.write(reinterpret_cast<const char*>(&key_len), sizeof(key_len));
+                idx_file.write(key.c_str(), key_len);
+                idx_file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+                idx_file.write(reinterpret_cast<const char*>(&file_pos), sizeof(file_pos));
+            }
         }
+        
+        idx_file.close();
     }
     
-    file.close();
-}
-
-void findEntries(const string& key) {
-    vector<Entry> entries = readAllEntries();
-    vector<int> values;
-    
-    for (const auto& entry : entries) {
-        if (entry.key == key) {
-            values.push_back(entry.value);
+    bool entryExistsInIndex(const string& key, int value) {
+        loadIndex();
+        auto it = index.find(key);
+        if (it == index.end()) return false;
+        
+        for (const auto& [v, pos] : it->second) {
+            if (v == value) return true;
         }
+        return false;
     }
     
-    if (values.empty()) {
-        cout << "null" << endl;
-    } else {
-        sort(values.begin(), values.end());
-        for (size_t i = 0; i < values.size(); ++i) {
-            if (i > 0) cout << " ";
-            cout << values[i];
+public:
+    FileDatabase() : index_loaded(false) {}
+    
+    void insert(const string& key, int value) {
+        if (entryExistsInIndex(key, value)) return;
+        
+        loadIndex();
+        
+        ofstream data_file(DATABASE_FILE, ios::binary | ios::app);
+        if (!data_file.is_open()) return;
+        
+        long long file_pos = data_file.tellp();
+        
+        size_t key_len = key.length();
+        data_file.write(reinterpret_cast<const char*>(&key_len), sizeof(key_len));
+        data_file.write(key.c_str(), key_len);
+        data_file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+        
+        data_file.close();
+        
+        index[key].push_back({value, file_pos});
+        saveIndex();
+    }
+    
+    void remove(const string& key, int value) {
+        loadIndex();
+        
+        auto it = index.find(key);
+        if (it == index.end()) return;
+        
+        bool found = false;
+        long long target_pos = -1;
+        
+        for (auto& [v, pos] : it->second) {
+            if (v == value) {
+                target_pos = pos;
+                found = true;
+                break;
+            }
+        }
+        
+        if (!found) return;
+        
+        it->second.erase(remove_if(it->second.begin(), it->second.end(),
+                                  [value](const pair<int, long long>& p) { return p.first == value; }),
+                        it->second.end());
+        
+        if (it->second.empty()) {
+            index.erase(it);
+        }
+        
+        ofstream data_file(DATABASE_FILE, ios::binary);
+        if (!data_file.is_open()) return;
+        
+        for (const auto& [k, entries] : index) {
+            for (const auto& [v, pos] : entries) {
+                size_t key_len = k.length();
+                data_file.write(reinterpret_cast<const char*>(&key_len), sizeof(key_len));
+                data_file.write(k.c_str(), key_len);
+                data_file.write(reinterpret_cast<const char*>(&v), sizeof(v));
+            }
+        }
+        
+        data_file.close();
+        
+        saveIndex();
+    }
+    
+    void find(const string& key) {
+        loadIndex();
+        
+        auto it = index.find(key);
+        if (it == index.end() || it->second.empty()) {
+            cout << "null" << endl;
+            return;
+        }
+        
+        set<int> values;
+        for (const auto& [value, pos] : it->second) {
+            values.insert(value);
+        }
+        
+        bool first = true;
+        for (int value : values) {
+            if (!first) cout << " ";
+            cout << value;
+            first = false;
         }
         cout << endl;
     }
-}
+};
 
 int main() {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
+    
+    FileDatabase db;
     
     int n;
     cin >> n;
@@ -119,16 +187,16 @@ int main() {
             string key;
             int value;
             cin >> key >> value;
-            insertEntry(key, value);
+            db.insert(key, value);
         } else if (command == "delete") {
             string key;
             int value;
             cin >> key >> value;
-            deleteEntry(key, value);
+            db.remove(key, value);
         } else if (command == "find") {
             string key;
             cin >> key;
-            findEntries(key);
+            db.find(key);
         }
     }
     
